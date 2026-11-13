@@ -1,0 +1,293 @@
+# Woodwolf ERPNext production stack on Coolify (Docker Compose build pack)
+#
+# Services: configurator, create-site, backend, frontend, websocket,
+# queue-short, queue-long, scheduler, db (MariaDB), redis-cache,
+# redis-queue, backup.
+#
+# Persistent volumes (all named, survive container recreation and redeploy):
+#   woodwolf-erpnext-db-data          -> MariaDB /var/lib/mysql
+#   woodwolf-erpnext-sites            -> /home/frappe/frappe-bench/sites,
+#                                        shared by backend, frontend,
+#                                        websocket, both workers, scheduler,
+#                                        configurator, create-site and backup
+#   woodwolf-erpnext-logs             -> bench logs
+#   woodwolf-erpnext-redis-queue-data -> Redis queue AOF persistence
+#   woodwolf-erpnext-backups          -> daily/weekly backups, outside the
+#                                        sites volume
+# Never run `docker compose down -v` against this stack.
+#
+# Environment variables (set in Coolify, never committed):
+#   SITE_NAME         Frappe site / public domain, e.g. manager.woodwolfdigital.com
+#   FRAPPE_IMAGE      custom image tag, default woodwolf-erpnext:v16.55.0
+#   ADMIN_PASSWORD    ERPNext Administrator password (first site creation only)
+#   DB_ROOT_PASSWORD  MariaDB root password
+
+services:
+  configurator:
+    image: "${FRAPPE_IMAGE:-woodwolf-erpnext:v16.55.0}"
+    build: .
+    pull_policy: build
+    deploy:
+      restart_policy:
+        condition: none
+    entrypoint:
+      - bash
+      - "-c"
+    command:
+      - >
+        set -e;
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+        bench set-config -g default_site $$SITE_NAME;
+    environment:
+      SITE_NAME: "${SITE_NAME}"
+      DB_HOST: db
+      DB_PORT: "3306"
+      REDIS_CACHE: "redis-cache:6379"
+      REDIS_QUEUE: "redis-queue:6379"
+      SOCKETIO_PORT: "9000"
+    volumes:
+      - "woodwolf-erpnext-sites:/home/frappe/frappe-bench/sites"
+      - "woodwolf-erpnext-logs:/home/frappe/frappe-bench/logs"
+
+  create-site:
+    image: "${FRAPPE_IMAGE:-woodwolf-erpnext:v16.55.0}"
+    pull_policy: never
+    deploy:
+      restart_policy:
+        condition: none
+    volumes:
+      - "woodwolf-erpnext-sites:/home/frappe/frappe-bench/sites"
+      - "woodwolf-erpnext-logs:/home/frappe/frappe-bench/logs"
+    environment:
+      SITE_NAME: "${SITE_NAME}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
+      DB_ROOT_PASSWORD: "${DB_ROOT_PASSWORD}"
+    entrypoint:
+      - bash
+      - "-c"
+    command:
+      - >
+        set -e;
+        wait-for-it -t 180 db:3306;
+        wait-for-it -t 120 redis-cache:6379;
+        wait-for-it -t 120 redis-queue:6379;
+        until grep -q '"db_host"' sites/common_site_config.json 2>/dev/null; do
+          echo "Waiting for configurator...";
+          sleep 5;
+        done;
+        if [ ! -d "sites/$${SITE_NAME}" ]; then
+          bench new-site "$${SITE_NAME}"
+            --mariadb-user-host-login-scope='%'
+            --admin-password="$${ADMIN_PASSWORD}"
+            --db-root-username=root
+            --db-root-password="$${DB_ROOT_PASSWORD}"
+            --set-default;
+        fi;
+        for app in payments erpnext hrms telephony helpdesk crm wiki; do
+          if ! bench --site "$${SITE_NAME}" list-apps | grep -qx "$${app}"; then
+            bench --site "$${SITE_NAME}" install-app "$${app}";
+          fi;
+        done;
+        bench --site "$${SITE_NAME}" migrate;
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+
+  backend:
+    image: "${FRAPPE_IMAGE:-woodwolf-erpnext:v16.55.0}"
+    pull_policy: never
+    deploy:
+      restart_policy:
+        condition: on-failure
+    volumes:
+      - "woodwolf-erpnext-sites:/home/frappe/frappe-bench/sites"
+      - "woodwolf-erpnext-logs:/home/frappe/frappe-bench/logs"
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+      configurator:
+        condition: service_completed_successfully
+
+  frontend:
+    image: "${FRAPPE_IMAGE:-woodwolf-erpnext:v16.55.0}"
+    pull_policy: never
+    deploy:
+      restart_policy:
+        condition: on-failure
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: "backend:8000"
+      SOCKETIO: "websocket:9000"
+      FRAPPE_SITE_NAME_HEADER: "${SITE_NAME}"
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+    volumes:
+      - "woodwolf-erpnext-sites:/home/frappe/frappe-bench/sites"
+      - "woodwolf-erpnext-logs:/home/frappe/frappe-bench/logs"
+    labels:
+      - traefik.enable=true
+      - 'traefik.http.routers.erpnext-router.rule=Host(`${SITE_NAME}`)'
+      - traefik.http.routers.erpnext-router.entrypoints=https
+      - traefik.http.routers.erpnext-router.tls=true
+      - traefik.http.routers.erpnext-router.tls.certresolver=letsencrypt
+      - traefik.http.services.erpnext.loadbalancer.server.port=8080
+    depends_on:
+      - backend
+      - websocket
+
+  websocket:
+    image: "${FRAPPE_IMAGE:-woodwolf-erpnext:v16.55.0}"
+    pull_policy: never
+    deploy:
+      restart_policy:
+        condition: on-failure
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    volumes:
+      - "woodwolf-erpnext-sites:/home/frappe/frappe-bench/sites"
+      - "woodwolf-erpnext-logs:/home/frappe/frappe-bench/logs"
+    environment:
+      FRAPPE_REDIS_CACHE: "redis://redis-cache:6379"
+      FRAPPE_REDIS_QUEUE: "redis://redis-queue:6379"
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+      configurator:
+        condition: service_completed_successfully
+
+  queue-short:
+    image: "${FRAPPE_IMAGE:-woodwolf-erpnext:v16.55.0}"
+    pull_policy: never
+    deploy:
+      restart_policy:
+        condition: on-failure
+    command:
+      - bench
+      - worker
+      - "--queue"
+      - "short,default"
+    volumes:
+      - "woodwolf-erpnext-sites:/home/frappe/frappe-bench/sites"
+      - "woodwolf-erpnext-logs:/home/frappe/frappe-bench/logs"
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+      configurator:
+        condition: service_completed_successfully
+
+  queue-long:
+    image: "${FRAPPE_IMAGE:-woodwolf-erpnext:v16.55.0}"
+    pull_policy: never
+    deploy:
+      restart_policy:
+        condition: on-failure
+    command:
+      - bench
+      - worker
+      - "--queue"
+      - "long,default,short"
+    volumes:
+      - "woodwolf-erpnext-sites:/home/frappe/frappe-bench/sites"
+      - "woodwolf-erpnext-logs:/home/frappe/frappe-bench/logs"
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+      configurator:
+        condition: service_completed_successfully
+
+  scheduler:
+    image: "${FRAPPE_IMAGE:-woodwolf-erpnext:v16.55.0}"
+    pull_policy: never
+    deploy:
+      restart_policy:
+        condition: on-failure
+    command:
+      - bench
+      - schedule
+    volumes:
+      - "woodwolf-erpnext-sites:/home/frappe/frappe-bench/sites"
+      - "woodwolf-erpnext-logs:/home/frappe/frappe-bench/logs"
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+      configurator:
+        condition: service_completed_successfully
+
+  backup:
+    image: "${FRAPPE_IMAGE:-woodwolf-erpnext:v16.55.0}"
+    pull_policy: never
+    deploy:
+      restart_policy:
+        condition: on-failure
+    entrypoint:
+      - bash
+      - "-c"
+    command:
+      - >
+        set -e;
+        while true; do
+          bash backup.sh;
+          sleep 86400;
+        done;
+    environment:
+      SITE_NAME: "${SITE_NAME}"
+    volumes:
+      - "woodwolf-erpnext-sites:/home/frappe/frappe-bench/sites"
+      - "woodwolf-erpnext-logs:/home/frappe/frappe-bench/logs"
+      - "woodwolf-erpnext-backups:/backups"
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+      configurator:
+        condition: service_completed_successfully
+
+  db:
+    image: "mariadb:11.8"
+    command:
+      - "--character-set-server=utf8mb4"
+      - "--collation-server=utf8mb4_unicode_ci"
+      - "--skip-character-set-client-handshake"
+    environment:
+      MYSQL_ROOT_PASSWORD: "${DB_ROOT_PASSWORD}"
+      MARIADB_ROOT_PASSWORD: "${DB_ROOT_PASSWORD}"
+    volumes:
+      - "woodwolf-erpnext-db-data:/var/lib/mysql"
+    healthcheck:
+      test:
+        - CMD
+        - healthcheck.sh
+        - "--connect"
+        - "--innodb_initialized"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis-cache:
+    image: "redis:6.2-alpine"
+
+  redis-queue:
+    image: "redis:6.2-alpine"
+    command:
+      - redis-server
+      - "--appendonly"
+      - "yes"
+    volumes:
+      - "woodwolf-erpnext-redis-queue-data:/data"
+
+volumes:
+  woodwolf-erpnext-db-data:
+  woodwolf-erpnext-redis-queue-data:
+  woodwolf-erpnext-sites:
+  woodwolf-erpnext-logs:
+  woodwolf-erpnext-backups:
