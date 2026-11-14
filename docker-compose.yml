@@ -100,8 +100,12 @@ services:
           bench new-site "$${SITE_NAME}" --mariadb-user-host-login-scope='%' --admin-password="$${ADMIN_PASSWORD}" --db-root-username=root --db-root-password="$${DB_ROOT_PASSWORD}" --set-default;
         fi;
         for app in payments erpnext hrms telephony helpdesk crm wiki; do
-          if ! bench --site "$${SITE_NAME}" list-apps | grep -qx "$${app}"; then
-            bench --site "$${SITE_NAME}" install-app "$${app}";
+          if grep -qx "$${app}" sites/apps.txt; then
+            if ! bench --site "$${SITE_NAME}" list-apps | grep -qx "$${app}"; then
+              bench --site "$${SITE_NAME}" install-app "$${app}";
+            fi;
+          else
+            echo "Skipping $${app}: not present in this image";
           fi;
         done;
         bench --site "$${SITE_NAME}" migrate;
@@ -242,11 +246,28 @@ services:
     entrypoint:
       - bash
       - "-c"
+    # Backup logic is inline (not bash backup.sh): the prebuilt image does
+    # not carry backup.sh, so the daily backup plus retention lives here.
+    # Retention: 7 daily copies, plus a Sunday copy kept for 4 weeks.
     command:
-      - >
+      - |
         set -e;
         while true; do
-          bash backup.sh;
+          SITE="$${SITE_NAME:?SITE_NAME is not set}";
+          TODAY="$$(date +%F)";
+          DAY_OF_WEEK="$$(date +%u)";
+          bench --site "$${SITE}" backup --with-files;
+          SRC="sites/$${SITE}/private/backups";
+          DEST="/backups/$${TODAY}";
+          mkdir -p "$${DEST}";
+          find "$${SRC}" -type f -mmin -10 -exec cp -a {} "$${DEST}"/ \;;
+          if [ "$${DAY_OF_WEEK}" = "7" ]; then
+            mkdir -p "/backups/weekly-$${TODAY}";
+            cp -a "$${DEST}"/. "/backups/weekly-$${TODAY}"/;
+          fi;
+          find /backups -maxdepth 1 -type d -name "20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]" -mtime +7 -exec rm -rf {} + 2>/dev/null || true;
+          find /backups -maxdepth 1 -type d -name "weekly-20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]" -mtime +28 -exec rm -rf {} + 2>/dev/null || true;
+          echo "Backup done for $${SITE} on $${TODAY}, stored in $${DEST}";
           sleep 86400;
         done;
     environment:
