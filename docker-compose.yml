@@ -25,8 +25,11 @@
 services:
   configurator:
     image: "${FRAPPE_IMAGE:-woodwolf-erpnext:v16.55.0}"
-    build: .
-    pull_policy: build
+    # No build: the deploy uses the prebuilt image set in Coolify
+    # (FRAPPE_IMAGE=developercrayon/erpnext-custom:v16-helpdesk-compat,
+    # pulled to the server before deploy). The Dockerfile in this repo is
+    # kept as the build source only.
+    pull_policy: never
     deploy:
       restart_policy:
         condition: none
