@@ -86,7 +86,14 @@ services:
           echo "Waiting for configurator...";
           sleep 5;
         done;
-        if [ ! -d "sites/$${SITE_NAME}" ]; then
+        # Create the site only if it is missing or unusable. A failed deploy
+        # can leave a site directory (site_config.json) without the MariaDB
+        # user and database, which makes a plain "directory exists" check
+        # skip creation and every later bench command fail with MySQL 1045.
+        # Test the site first; if it does not answer, remove the partial
+        # directory and create it fresh. A healthy site is never touched.
+        if ! bench --site "$${SITE_NAME}" list-apps >/dev/null 2>&1; then
+          [ -n "$${SITE_NAME}" ] && rm -rf "sites/$${SITE_NAME}";
           bench new-site "$${SITE_NAME}" --mariadb-user-host-login-scope='%' --admin-password="$${ADMIN_PASSWORD}" --db-root-username=root --db-root-password="$${DB_ROOT_PASSWORD}" --set-default;
         fi;
         for app in payments erpnext hrms telephony helpdesk crm wiki; do
