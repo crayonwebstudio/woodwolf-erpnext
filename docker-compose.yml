@@ -71,8 +71,13 @@ services:
     entrypoint:
       - bash
       - "-c"
+    # Literal block (|), not folded (>): with >, the more-indented
+    # continuation lines of bench new-site kept their newlines, so bash
+    # ran `bench new-site <site>` with NO options. That made Frappe prompt
+    # interactively for the MySQL root password and crash with EOFError.
+    # With | the script reaches bash exactly as written.
     command:
-      - >
+      - |
         set -e;
         wait-for-it -t 180 db:3306;
         wait-for-it -t 120 redis-cache:6379;
@@ -82,12 +87,7 @@ services:
           sleep 5;
         done;
         if [ ! -d "sites/$${SITE_NAME}" ]; then
-          bench new-site "$${SITE_NAME}"
-            --mariadb-user-host-login-scope='%'
-            --admin-password="$${ADMIN_PASSWORD}"
-            --db-root-username=root
-            --db-root-password="$${DB_ROOT_PASSWORD}"
-            --set-default;
+          bench new-site "$${SITE_NAME}" --mariadb-user-host-login-scope='%' --admin-password="$${ADMIN_PASSWORD}" --db-root-username=root --db-root-password="$${DB_ROOT_PASSWORD}" --set-default;
         fi;
         for app in payments erpnext hrms telephony helpdesk crm wiki; do
           if ! bench --site "$${SITE_NAME}" list-apps | grep -qx "$${app}"; then
