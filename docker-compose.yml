@@ -138,16 +138,17 @@ services:
         condition: on-failure
     # The sites volume's assets entry is a symlink to the container-local
     # /home/frappe/frappe-bench/assets, so a bench build in the backend does
-    # not make Helpdesk assets visible to the frontend. The frontend image
-    # already carries the built Helpdesk files under
-    # apps/helpdesk/helpdesk/public, it only lacks this symlink, which is
-    # why /helpdesk was blank white (all assets 404). Create it at every
-    # frontend start so a redeploy or container recreation does not lose it.
+    # not make app assets visible to the frontend. The frontend image
+    # already carries the built app files under apps/<app>/<app>/public,
+    # it only lacks these symlinks, which is why /helpdesk was blank white
+    # (all assets 404) and the Wiki icon was missing with the app blank.
+    # Create them at every frontend start so a redeploy or container
+    # recreation does not lose them.
     command:
       - sh
       - -c
       - |
-        if [ -d /home/frappe/frappe-bench/apps/helpdesk/helpdesk/public ]; then ln -sfn /home/frappe/frappe-bench/apps/helpdesk/helpdesk/public /home/frappe/frappe-bench/assets/helpdesk; fi; exec nginx-entrypoint.sh
+        if [ -d /home/frappe/frappe-bench/apps/helpdesk/helpdesk/public ]; then ln -sfn /home/frappe/frappe-bench/apps/helpdesk/helpdesk/public /home/frappe/frappe-bench/assets/helpdesk; fi; if [ -d /home/frappe/frappe-bench/apps/wiki/wiki/public ]; then ln -sfn /home/frappe/frappe-bench/apps/wiki/wiki/public /home/frappe/frappe-bench/assets/wiki; fi; exec nginx-entrypoint.sh
     environment:
       BACKEND: "backend:8000"
       SOCKETIO: "websocket:9000"
