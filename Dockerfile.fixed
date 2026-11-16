@@ -7,12 +7,13 @@
 # telephony 0.0.1, helpdesk 16.1.0, crm 1.86.0 and wiki 3.4.0.
 #
 # Fixes baked in here:
-# 1. Helpdesk desk assets symlink. The frontend serves /assets from the
-#    container-local /home/frappe/frappe-bench/assets. The Helpdesk app
-#    ships its built files under apps/helpdesk/helpdesk/public, but the
-#    assets symlink was missing, so /helpdesk returned 404 for every
-#    asset and showed a white page. The symlink is created here so it
-#    is part of the image and survives any redeploy.
+# 1. Helpdesk and Wiki desk assets symlinks. The frontend serves /assets
+#    from the container-local /home/frappe/frappe-bench/assets. The apps
+#    ship their built files under apps/<app>/<app>/public, but the assets
+#    symlinks were missing, so /helpdesk returned 404 for every asset and
+#    showed a white page, and the Wiki icon was missing with the app blank.
+#    The symlinks are created here so they are part of the image and
+#    survive any redeploy.
 # 2. backup.sh. It was not in the ready image, so the backup service ran
 #    the logic inline in docker-compose.yml. It is copied in here so the
 #    image is self-contained.
@@ -26,10 +27,11 @@ FROM developercrayon/erpnext-custom:v16-helpdesk-compat
 USER root
 
 # Ensure the container-local assets directory exists, then link the
-# Helpdesk public directory into it.
+# Helpdesk and Wiki public directories into it.
 RUN mkdir -p /home/frappe/frappe-bench/assets \
     && ln -sfn /home/frappe/frappe-bench/apps/helpdesk/helpdesk/public /home/frappe/frappe-bench/assets/helpdesk \
-    && ls -l /home/frappe/frappe-bench/assets/helpdesk
+    && ln -sfn /home/frappe/frappe-bench/apps/wiki/wiki/public /home/frappe/frappe-bench/assets/wiki \
+    && ls -l /home/frappe/frappe-bench/assets/helpdesk /home/frappe/frappe-bench/assets/wiki
 
 # Copy the backup script into the image.
 COPY backup.sh /usr/local/bin/backup.sh
