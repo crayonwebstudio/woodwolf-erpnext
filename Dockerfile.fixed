@@ -1,0 +1,38 @@
+# Fixed image: the ready image plus the fixes that were applied manually
+# after the first deploy, so a fresh deploy needs no additional work.
+#
+# Base is the ready image the user provided:
+#   developercrayon/erpnext-custom:v16-helpdesk-compat
+# It already carries frappe 16.36.1, erpnext 16.37.0, hrms 16.20.1,
+# telephony 0.0.1, helpdesk 16.1.0, crm 1.86.0 and wiki 3.4.0.
+#
+# Fixes baked in here:
+# 1. Helpdesk desk assets symlink. The frontend serves /assets from the
+#    container-local /home/frappe/frappe-bench/assets. The Helpdesk app
+#    ships its built files under apps/helpdesk/helpdesk/public, but the
+#    assets symlink was missing, so /helpdesk returned 404 for every
+#    asset and showed a white page. The symlink is created here so it
+#    is part of the image and survives any redeploy.
+# 2. backup.sh. It was not in the ready image, so the backup service ran
+#    the logic inline in docker-compose.yml. It is copied in here so the
+#    image is self-contained.
+#
+# Build (on a machine that already has the base image, or it will be
+# pulled from Docker Hub):
+#   docker build -f Dockerfile.fixed -t developercrayon/erpnext-custom:v16-helpdesk-compat-fixed .
+# Then push it and set FRAPPE_IMAGE in Coolify to the new tag.
+FROM developercrayon/erpnext-custom:v16-helpdesk-compat
+
+USER root
+
+# Ensure the container-local assets directory exists, then link the
+# Helpdesk public directory into it.
+RUN mkdir -p /home/frappe/frappe-bench/assets \
+    && ln -sfn /home/frappe/frappe-bench/apps/helpdesk/helpdesk/public /home/frappe/frappe-bench/assets/helpdesk \
+    && ls -l /home/frappe/frappe-bench/assets/helpdesk
+
+# Copy the backup script into the image.
+COPY backup.sh /usr/local/bin/backup.sh
+RUN chmod +x /usr/local/bin/backup.sh
+
+USER frappe
